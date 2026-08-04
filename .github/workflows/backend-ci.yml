@@ -1,0 +1,41 @@
+name: backend-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  lint-typecheck-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npx tsc -p tsconfig.json --noEmit
+
+      # Current test suite is pure-function unit tests (chunking, prompt/
+      # citation parsing, auth hashing/JWT) with no DB dependency — see
+      # README's testing-strategy note for why DB-backed integration tests
+      # (a Postgres+pgvector service container, migrations, then supertest
+      # against real routes) are the deliberate next step, not done here.
+      - run: npm test

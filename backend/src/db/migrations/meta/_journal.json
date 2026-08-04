@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1785554924095,
+      "tag": "0000_freezing_morlun",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785988800000,
+      "tag": "0001_chunks_fulltext_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785653437380,
+      "tag": "0002_nemotron_embedding_2048",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785665089768,
+      "tag": "0003_fair_joseph",
+      "breakpoints": true
+    }
+  ]
+}

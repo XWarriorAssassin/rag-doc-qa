@@ -1,0 +1,55 @@
+# Local development only. The actual deployment target is Neon (managed
+# Postgres, pgvector-enabled, serverless) — see README's deployment
+# section. This compose file exists so `docker compose up` gives a fresh
+# pgvector-capable Postgres instance for local development and the Phase 6
+# eval script, without needing a Neon project (or burning its free-tier
+# compute hours) just to iterate locally.
+services:
+  postgres:
+    # pgvector/pgvector ships the vector extension pre-installed — plain
+    # postgres:16 would need `CREATE EXTENSION vector` to fail here, since
+    # the extension's .so files aren't in a stock image at all (this isn't
+    # something `CREATE EXTENSION` can fetch on its own; it has to already
+    # be compiled into the image).
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: docuquery
+      POSTGRES_PASSWORD: docuquery_dev_only
+      POSTGRES_DB: docuquery
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docuquery"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # Overrides whatever DATABASE_URL is in backend/.env with this
+      # compose network's service name — "postgres" resolves via Docker's
+      # internal DNS, "localhost" (correct for running the backend
+      # directly on the host) would not resolve from inside this
+      # container.
+      DATABASE_URL: postgresql://docuquery:docuquery_dev_only@postgres:5432/docuquery
+      NODE_ENV: development
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Named volume, not a bind mount to the host — uploaded PDFs only
+      # need to survive container restarts during local dev, not be
+      # editable from the host filesystem.
+      - storage:/app/storage
+
+volumes:
+  pgdata:
+  storage:

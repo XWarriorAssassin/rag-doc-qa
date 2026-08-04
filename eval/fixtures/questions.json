@@ -1,0 +1,92 @@
+[
+  {
+    "id": "q1",
+    "question": "What year was Aurora Bikes founded?",
+    "expectedAnswerable": true,
+    "expectedPages": [2]
+  },
+  {
+    "id": "q2",
+    "question": "Where is Aurora Bikes headquartered?",
+    "expectedAnswerable": true,
+    "expectedPages": [2]
+  },
+  {
+    "id": "q3",
+    "question": "Roughly how many people does Aurora Bikes employ?",
+    "expectedAnswerable": true,
+    "expectedPages": [2]
+  },
+  {
+    "id": "q4",
+    "question": "How many PTO days per year do full-time employees get?",
+    "expectedAnswerable": true,
+    "expectedPages": [3]
+  },
+  {
+    "id": "q5",
+    "question": "What's the maximum number of unused PTO days I can carry over to next year?",
+    "expectedAnswerable": true,
+    "expectedPages": [3]
+  },
+  {
+    "id": "q6",
+    "question": "Which days of the week do I need to be in the office under the hybrid work policy?",
+    "expectedAnswerable": true,
+    "expectedPages": [4]
+  },
+  {
+    "id": "q7",
+    "question": "Who has to approve an exception to the standard hybrid work schedule?",
+    "expectedAnswerable": true,
+    "expectedPages": [4]
+  },
+  {
+    "id": "q8",
+    "question": "How many days do I have to submit an expense for reimbursement?",
+    "expectedAnswerable": true,
+    "expectedPages": [5]
+  },
+  {
+    "id": "q9",
+    "question": "Above what dollar amount does an expense need prior manager approval?",
+    "expectedAnswerable": true,
+    "expectedPages": [5]
+  },
+  {
+    "id": "q10",
+    "question": "How many weeks of paid parental leave does Aurora Bikes offer?",
+    "expectedAnswerable": true,
+    "expectedPages": [6]
+  },
+  {
+    "id": "q11",
+    "question": "How long do I need to have worked at Aurora Bikes to be eligible for parental leave?",
+    "expectedAnswerable": true,
+    "expectedPages": [6]
+  },
+  {
+    "id": "q12",
+    "question": "Compare the PTO carryover cap to how many weeks of parental leave are offered.",
+    "expectedAnswerable": true,
+    "expectedPages": [3, 6]
+  },
+  {
+    "id": "q13",
+    "question": "What is the CEO's name?",
+    "expectedAnswerable": false,
+    "expectedPages": []
+  },
+  {
+    "id": "q14",
+    "question": "What's the office WiFi password?",
+    "expectedAnswerable": false,
+    "expectedPages": []
+  },
+  {
+    "id": "q15",
+    "question": "How many vacation days do employees in the London office get?",
+    "expectedAnswerable": false,
+    "expectedPages": []
+  }
+]

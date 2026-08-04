@@ -1,0 +1,31 @@
+# Render Blueprint (render.com/docs/blueprint-spec). Lets `render.com` spin
+# up the backend service directly from this repo via "New > Blueprint"
+# instead of manually clicking through the dashboard's create-service form
+# — the actual env var VALUES (secrets) are still entered in Render's UI,
+# never committed here; `sync: false` is what tells Render "prompt for
+# this one, don't expect it in the repo."
+services:
+  - type: web
+    name: docuquery-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false # Neon connection string
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: CHAT_MODEL
+        sync: false # e.g. an OpenRouter :free chat model slug
+      - key: JWT_SECRET
+        generateValue: true # Render generates and stores a random secret
+      - key: CORS_ORIGIN
+        sync: false # exact deployed frontend origin, e.g. https://your-app.vercel.app
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
