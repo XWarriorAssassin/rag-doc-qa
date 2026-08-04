@@ -1,25 +1,25 @@
 # DocuQuery — RAG Document Q&A
 
-Upload a PDF, ask questions about it in plain English, get answers grounded
-strictly in that document's content — with inline citations back to the
-exact page they came from, and an honest "not in this document" instead of
-a hallucinated guess when the answer isn't there.
+A full-stack Retrieval-Augmented Generation system for document question
+answering. Users upload a PDF and ask natural-language questions about it;
+answers are generated strictly from the document's content, with inline
+citations to the source page, and an explicit refusal instead of a guess
+when the document does not contain the answer.
 
-Built as a portfolio project targeting product-based company placements.
-Full-stack: React/TypeScript frontend, Node/Express backend, Postgres +
-pgvector for both relational data and embeddings, JWT auth over httpOnly
-cookies, and a WebSocket-streamed chat interface.
+**Stack:** React + TypeScript frontend, Node.js/Express backend, PostgreSQL
+with the pgvector extension for both relational data and embeddings, JWT
+authentication over httpOnly cookies, WebSocket-based streaming responses.
 
 ## Table of contents
 
 - [Architecture](#architecture)
-- [Why these tech choices](#why-these-tech-choices)
+- [Design decisions](#design-decisions)
 - [Local development](#local-development)
 - [Deployment](#deployment)
-- [Testing strategy](#testing-strategy)
+- [Testing](#testing)
 - [Evaluation](#evaluation)
-- [Security notes](#security-notes)
-- [What I'd do differently at scale](#what-id-do-differently-at-scale)
+- [Security](#security)
+- [Scaling considerations](#scaling-considerations)
 - [Project structure](#project-structure)
 
 ## Architecture
@@ -38,14 +38,14 @@ flowchart TD
     end
 
     subgraph External["OpenRouter"]
-        Embed["Embedding model<br/>nvidia/nemotron-3-embed-1b (2048-dim)"]
-        Chat["Chat model<br/>free-tier, configurable via CHAT_MODEL"]
+        Embed["Embedding model<br/>nvidia/nemotron-3-embed-1b, 2048-dim"]
+        Chat["Chat model<br/>configurable via CHAT_MODEL"]
     end
 
     subgraph DB["Postgres + pgvector (Neon)"]
         Users[(users)]
         Docs[(documents)]
-        Chunks[(chunks<br/>embedding vector(2048))]
+        Chunks[(chunks<br/>embedding vector, 2048-dim)]
         Convos[(conversations)]
         Msgs[(messages)]
         RateLimit[(rate_limit_windows)]
@@ -56,10 +56,10 @@ flowchart TD
     REST -- "upload" --> Pipeline
     Pipeline -- "embed chunks" --> Embed
     Pipeline --> Chunks
-    REST -- "ask (non-streaming)" --> RAG
-    WS -- "ask (streaming)" --> RAG
+    REST -- "ask, non-streaming" --> RAG
+    WS -- "ask, streaming" --> RAG
     RAG -- "embed question" --> Embed
-    RAG -- "hybrid search: cosine <=> AND full-text" --> Chunks
+    RAG -- "hybrid search: cosine and full-text" --> Chunks
     RAG -- "generate" --> Chat
     REST --> Users
     REST --> Docs
@@ -69,130 +69,129 @@ flowchart TD
     WS -.->|"rate limit check"| RateLimit
 ```
 
-**Request flow, end to end:**
+**Request flow:**
 
-1. **Upload** — PDF lands in per-user storage, a `documents` row is created
-   with `status: pending`, and the response returns immediately. Extraction/
-   chunking/embedding happens asynchronously (see `backend/src/pipeline/`);
-   the frontend polls document status until it flips to `ready`.
-2. **Ask** — the question is embedded, then matched against the document's
-   chunks via **hybrid search**: cosine distance (`<=>`, pgvector) *and* a
-   Postgres full-text match, fused by reciprocal rank. A chunk counts as
-   relevant if either leg vouches for it. If nothing clears the bar, the
-   LLM is never called — the fallback message is returned directly.
-3. **Generate** — relevant chunks are numbered and inserted into a system
-   prompt instructing the model to answer *only* from the given excerpts,
-   cite every fact with a `[n]` marker, and emit an exact sentinel token
-   (`NOT_FOUND_IN_DOCUMENT`) if the excerpts don't actually answer the
-   question. The REST path calls this non-streaming; the WebSocket path
-   streams tokens live and resolves citations once the full completion
-   lands (citation markers can't be resolved mid-token — a `[1]` can arrive
-   split across two stream chunks).
-4. **Persist** — both the question and answer are stored in `messages`,
-   with `cited_chunk_ids` for citation replay on conversation reload.
+1. **Upload.** The PDF is written to per-user storage and a `documents` row
+   is created with `status: pending`; the upload request returns
+   immediately. Extraction, chunking, and embedding run asynchronously
+   (`backend/src/pipeline/`); the frontend polls document status until it
+   reaches `ready`.
+2. **Retrieval.** The question is embedded and matched against the
+   document's chunks using hybrid search: cosine distance (pgvector's
+   `<=>` operator) combined with a PostgreSQL full-text match, fused by
+   reciprocal rank. A chunk is treated as relevant if either method
+   surfaces it. If no chunk clears the relevance threshold, the language
+   model is not called and the fallback message is returned directly.
+3. **Generation.** Relevant chunks are numbered and inserted into a system
+   prompt that instructs the model to answer only from the given
+   excerpts, cite each fact with a `[n]` marker, and return a fixed
+   sentinel token (`NOT_FOUND_IN_DOCUMENT`) if the excerpts do not answer
+   the question. The REST endpoint calls this synchronously; the
+   WebSocket endpoint streams tokens as they are generated and resolves
+   citations once the full response has been received, since a citation
+   marker can be split across two streamed chunks.
+4. **Persistence.** The question and answer are stored in `messages`,
+   including `cited_chunk_ids`, so citations can be replayed when a
+   conversation is reloaded.
 
-## Why these tech choices
+## Design decisions
 
-### Postgres + pgvector instead of a dedicated vector DB
+### PostgreSQL + pgvector instead of a dedicated vector database
 
-The brief specifically asked for this tradeoff to be justified, so:
+A single database is used for both relational data and vector embeddings,
+rather than pairing Postgres with a dedicated vector store (Pinecone,
+Qdrant, Weaviate, etc.).
 
-**Why this is the right call here:** one database instead of two, one
-connection pool, one set of migrations, one backup/restore story, one place
-transactions can span (e.g. a document row and its chunks committing
-together). At this project's scale — a portfolio app with per-user document
-counts in the tens to low hundreds, not a multi-tenant SaaS serving
-millions of vectors — pgvector's brute-force/IVFFlat/HNSW search is
-comfortably fast enough, and the operational simplicity of "one Postgres
-instance" is worth far more than a dedicated vector DB's extra query
-throughput at this scale.
+**Rationale.** One connection pool, one migration history, one
+backup/restore process, and the ability for a document row and its chunks
+to commit within the same transaction. At this project's scale — document
+counts in the tens to low hundreds per user, not a multi-tenant system
+serving millions of vectors — pgvector's exact and approximate search
+methods are comfortably fast enough, and the operational simplicity of a
+single database outweighs the additional query throughput a dedicated
+vector store would provide.
 
-**Where a dedicated vector DB (Pinecone, Qdrant, Weaviate) wins instead:**
-horizontal scaling of vector search independent of the relational
-workload, more advanced ANN index tuning options, and native multi-vector/
-hybrid-search features that Postgres's full-text search + pgvector
-combination approximates but doesn't natively unify. If document/user
-counts grew by 100–1000x, or if vector search latency became the
-bottleneck under real concurrent load, that's the point to reconsider —
-and it's a swap, not a rewrite, since the retrieval layer (`retrieveChunks.ts`)
-is already isolated behind a single function.
+**Where a dedicated vector database would be preferable:** independent
+horizontal scaling of vector search from the relational workload, more
+advanced approximate nearest-neighbor index tuning, and native multi-vector
+or hybrid-search capabilities that this project approximates via Postgres
+full-text search rather than provides natively. If document or user counts
+grew by one to three orders of magnitude, or vector search latency became
+a bottleneck under concurrent load, this would be the point to reconsider.
+Because the retrieval layer is isolated behind a single function
+(`retrieveChunks.ts`), such a change would be a swap rather than a rewrite.
 
-**A concrete gap today:** there's currently no HNSW/IVFFlat index on
-`chunks.embedding` — the migrations create the column, but not an ANN
-index — so vector search is an exact sequential scan. That's genuinely
-fine at this project's chunk-count scale (and arguably *more* accurate
-than an approximate index at this size), but it's the first thing to add
-before pgvector's simplicity story would start to break down at larger
-scale.
+**Current limitation.** No HNSW or IVFFlat index exists on
+`chunks.embedding`; vector search is currently an exact sequential scan.
+This is acceptable at the project's current chunk-count scale and is more
+accurate than an approximate index at this size, but is the first change
+required if chunk counts grow significantly.
 
-### OpenRouter for both embeddings and chat
+### OpenRouter for embeddings and chat completion
 
-One API key, one base URL, OpenAI-compatible SDK — and the ability to swap
-either the embedding or chat model with a one-line env change (`CHAT_MODEL`)
-instead of a provider-specific SDK migration. The tradeoff: OpenRouter adds
-a proxy hop and its own rate limits on top of the underlying provider's,
-which is part of why this project also implements its own app-level rate
-limiting rather than relying solely on upstream limits (see
-[Security notes](#security-notes)).
+A single API key and OpenAI-compatible SDK are used for both embedding
+generation and chat completion, with the embedding and chat models each
+configurable independently via environment variables. The tradeoff is an
+additional proxy hop and rate limits layered on top of the underlying
+provider's own limits, which is one reason this project also implements
+its own application-level rate limiting rather than relying solely on
+upstream limits (see [Security](#security)).
 
-**Embeddings do not support streaming on OpenRouter** — only the chat/
-generation call does. This is why the pipeline's embedding step
+OpenRouter does not support streaming for embedding requests, only for
+chat completion. Accordingly, the embedding step
 (`pipeline/embedChunks.ts`) is a single blocking batch call per document,
-while only the final answer-generation call
-(`rag/generateAnswer.ts`'s `streamAnswer`) streams token-by-token.
+while only the answer-generation call (`rag/generateAnswer.ts`) streams
+token by token.
 
-### Hybrid search (vector + full-text), not vector-only
+### Hybrid search rather than vector search alone
 
-Pure embedding similarity search misses exact keyword/proper-noun matches
-surprisingly often — a chunk mentioning a specific product SKU or a named
-policy can rank below more "semantically similar" but less relevant
-chunks. `retrieveChunks.ts` runs both a cosine-distance vector search and a
-Postgres full-text (`tsvector`/`plainto_tsquery`) search, then fuses the two
-ranked lists via **reciprocal rank fusion** — a chunk that either leg
-strongly vouches for survives the relevance cutoff, not just chunks that
-both legs agree on.
+Embedding similarity search alone can miss exact keyword or proper-noun
+matches — a chunk containing a specific identifier or named policy can
+rank below a chunk that is more semantically similar but less relevant.
+`retrieveChunks.ts` runs a cosine-distance vector search and a PostgreSQL
+full-text search (`tsvector` / `plainto_tsquery`) in parallel and fuses the
+two ranked lists via reciprocal rank fusion, so a chunk strongly supported
+by either method survives the relevance filter.
 
-### WebSocket for streaming, not SSE
+### WebSocket streaming rather than Server-Sent Events
 
-Server-Sent Events would have been the simpler choice for this project's
-one-directional token stream, and was seriously considered. WebSocket was
-chosen instead specifically as a deliberate scope decision to build (and be
-able to speak to in interviews) full-duplex, stateful connection handling —
-cookie-authenticated upgrade handshake, per-message ownership
-re-validation, reconnect-with-backoff on the client. The real product
-tradeoff this introduces: WebSocket needs its own reconnection logic (SSE
-gets this for free via `EventSource`'s built-in auto-reconnect), which is
-why `frontend/src/hooks/useChatSocket.ts` implements a bounded single-retry
-reconnect rather than assuming the connection just stays up.
+Server-Sent Events would have been sufficient for this project's
+one-directional token stream and were considered as an alternative.
+WebSocket was chosen to implement full-duplex, stateful connection
+handling end to end: a cookie-authenticated upgrade handshake, per-message
+ownership validation, and client-side reconnection. The corresponding cost
+is that reconnection logic has to be implemented explicitly — `EventSource`
+provides automatic reconnection for SSE; WebSocket does not — which is why
+`frontend/src/hooks/useChatSocket.ts` implements a bounded single-retry
+reconnect.
 
-### httpOnly cookie auth, not localStorage + Authorization header
+### httpOnly cookie authentication rather than a token in localStorage
 
-A JWT in `localStorage` is readable by any JS running on the page — one XSS
-vulnerability anywhere in the frontend's dependency tree (including a
-compromised npm package) means every logged-in user's session is
-exfiltratable. An httpOnly cookie is invisible to JavaScript entirely; the
-tradeoff is CSRF exposure instead, which is why every state-changing route
-lives behind `SameSite` cookie policy plus CORS configured to an exact
-origin (`CORS_ORIGIN`, no wildcard) rather than `*`.
+A JWT stored in `localStorage` is readable by any script running on the
+page, so a single XSS vulnerability anywhere in the frontend's dependency
+tree is sufficient to exfiltrate every logged-in user's session. An
+httpOnly cookie is not accessible to JavaScript at all; the corresponding
+tradeoff is CSRF exposure, addressed here via `SameSite` cookie policy and
+CORS restricted to an exact origin rather than a wildcard.
 
-Because the frontend (Vercel) and backend (Render) are different origins in
-production, the cookie needs `SameSite=None; Secure` there — which also
-means the whole auth flow silently doesn't work over plain HTTP; both
-deploy targets serve HTTPS by default, and local dev falls back to
-`SameSite=Lax` (see `backend/src/lib/auth.ts`).
+Because the frontend (Vercel) and backend (Render) are different origins
+in production, the cookie requires `SameSite=None; Secure`, which in turn
+requires HTTPS on both sides — both deployment targets provide this by
+default. Local development uses `SameSite=Lax` instead (see
+`backend/src/lib/auth.ts`).
 
-### Postgres-backed rate limiting, not Redis
+### Postgres-backed rate limiting rather than Redis
 
-Consistent with the pgvector decision above: this project already commits
-to "just Postgres," and a fixed-window counter via one atomic
-`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` (see
-`backend/src/lib/rateLimiter.ts`) needs no new infrastructure. The known
-weakness of a fixed window — up to 2x the stated limit if requests cluster
-right across a window boundary — is an accepted tradeoff; a sliding-window
-or token-bucket scheme (typically Redis-backed, often via a Lua script for
-atomicity) is the natural upgrade if this ever needed to be precise under
-real adversarial load rather than just protect free-tier LLM quota from
-accidental bursts.
+Consistent with the database decision above, rate limiting is implemented
+as a fixed-window counter using a single atomic
+`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` statement
+(`backend/src/lib/rateLimiter.ts`), requiring no additional infrastructure.
+The known limitation of a fixed window — up to twice the stated limit if
+requests cluster across a window boundary — is an accepted tradeoff for
+this project's purpose, which is to guard against accidental overuse of
+free-tier LLM quota rather than to enforce precise limits under adversarial
+load. A sliding-window or token-bucket scheme, typically Redis-backed,
+would be the appropriate upgrade if stricter guarantees were required.
 
 ## Local development
 
@@ -200,30 +199,30 @@ accidental bursts.
 
 ```bash
 cp backend/.env.example backend/.env
-# fill in OPENROUTER_API_KEY, CHAT_MODEL, JWT_SECRET (openssl rand -base64 48)
+# Fill in OPENROUTER_API_KEY, CHAT_MODEL, and JWT_SECRET (openssl rand -base64 48).
 # DATABASE_URL and CORS_ORIGIN are overridden by docker-compose.yml for
-# local use — you don't need to set them in backend/.env for this path.
+# local use and do not need to be set in backend/.env for this option.
 
 docker compose up --build
-# backend on :4000, Postgres+pgvector on :5432 (auto-migrated on container start)
+# Backend on :4000, Postgres with pgvector on :5432, migrations run automatically.
 ```
 
 ```bash
 cd frontend
 npm install
 npm run dev
-# :5173, proxies /api and /ws to the backend container automatically
+# :5173, proxies /api and /ws to the backend container.
 ```
 
-### Option B — running natively (no Docker)
+### Option B — running natively, without Docker
 
-Requires a local Postgres with the `vector` extension available (e.g. via
-`apt install postgresql-16-pgvector` on Debian/Ubuntu, or use Neon's free
-tier directly instead of a local instance).
+Requires a local PostgreSQL instance with the `vector` extension available
+(for example, `postgresql-16-pgvector` on Debian/Ubuntu), or a Neon
+connection string used directly instead of a local instance.
 
 ```bash
 cd backend
-cp .env.example .env   # fill in all values, including a real DATABASE_URL
+cp .env.example .env   # fill in all values, including DATABASE_URL
 npm install
 npm run db:migrate
 npm run dev             # :4000
@@ -231,73 +230,71 @@ npm run dev             # :4000
 
 ```bash
 cd frontend
-cp .env.example .env    # VITE_API_URL can stay empty for local dev
+cp .env.example .env    # VITE_API_URL can remain empty for local development
 npm install
 npm run dev              # :5173
 ```
 
 ## Deployment
 
-| Piece | Target | Notes |
+| Component | Target | Notes |
 |---|---|---|
-| Frontend | Vercel | Root directory `frontend/`, build command `npm run build`, output `dist/`. Set `VITE_API_URL` to the deployed backend's URL. |
-| Backend | Render | `render.yaml` blueprint at repo root — "New > Blueprint" in Render picks it up directly. Builds from `backend/Dockerfile`. Set the `sync: false` env vars in Render's dashboard (never commit real secrets). |
-| Database | Neon | Free tier, pgvector-enabled, persistent (not the ephemeral/branching-only tier). Run `npm run db:migrate` once against the Neon connection string, or let the container's start command do it automatically (see `backend/Dockerfile`). |
+| Frontend | Vercel | Root directory `frontend/`, build command `npm run build`, output directory `dist/`. Set `VITE_API_URL` to the deployed backend URL. |
+| Backend | Render | `render.yaml` at the repository root is picked up directly via Render's Blueprint deployment. Builds from `backend/Dockerfile`. Secret-bearing env vars are marked `sync: false` and must be set in Render's dashboard. |
+| Database | Neon | Free tier, pgvector-enabled, persistent. Run `npm run db:migrate` once against the Neon connection string, or rely on the container's start command to run migrations automatically (see `backend/Dockerfile`). |
 
-After both are deployed: set the backend's `CORS_ORIGIN` to the exact
-Vercel URL, and the frontend's `VITE_API_URL` to the exact Render URL. Both
-have to be exact — no wildcards, no trailing slashes — for the
-credentialed CORS + cross-origin cookie setup to work (see
-[Why httpOnly cookies](#httponly-cookie-auth-not-localstorage--authorization-header)
-above).
+After both services are deployed, set the backend's `CORS_ORIGIN` to the
+exact frontend origin and the frontend's `VITE_API_URL` to the exact
+backend origin. Both values must be exact, with no wildcard and no
+trailing slash, for credentialed cross-origin requests and the
+cross-origin cookie to function correctly.
 
-## Testing strategy
+## Testing
 
-**What's covered today:** pure-function unit tests (`backend/src/**/*.test.ts`,
-run via `npm test` / `vitest`) for the chunking algorithm, prompt
-construction + citation parsing, and the auth library (password hashing,
-JWT round-trip, cookie policy by environment) — 25 tests, no database
-dependency, fast enough to run on every push (see
-`.github/workflows/backend-ci.yml`).
+**Current coverage.** Pure-function unit tests
+(`backend/src/**/*.test.ts`, run via `npm test`) cover the chunking
+algorithm, prompt construction and citation parsing, and the
+authentication library (password hashing, JWT round-trip, cookie policy by
+environment) — 25 tests with no database dependency, run on every push via
+`.github/workflows/backend-ci.yml`.
 
-**What's deliberately not covered yet, and why:** route-level integration
-tests (e.g. `supertest` against `POST /api/auth/signup` → `POST
-/api/documents/upload` → `POST /api/conversations/:id/messages`) would need
-a real Postgres instance in CI — a `postgres` service container with
-migrations run before the test job, which `supertest` is already a
-devDependency for. This is the natural next testing investment, scoped out
-here to keep CI simple and fast while the pure-logic layer (where most of
-the actual bugs during development showed up — citation parsing edge
-cases, chunk boundary math) has solid coverage.
+**Not yet covered.** Route-level integration tests (for example,
+`supertest` against the signup, upload, and ask-question endpoints in
+sequence) require a live Postgres instance in CI — a service container
+with migrations applied before the test job runs. `supertest` is already a
+development dependency in anticipation of this. This is intentionally
+scoped out for now to keep CI fast, while the pure-logic layer — where
+most defects surfaced during development, particularly citation-parsing
+edge cases and chunk-boundary handling — has solid coverage.
 
-**Frontend:** no component tests yet. CI currently treats a clean
-`tsc -b && vite build` as the smoke-test signal. React Testing Library +
-Vitest would be the natural addition, starting with `MessageBubble`'s
-citation-marker rendering logic (the highest-complexity, most bug-prone
-piece of frontend code in this project).
+**Frontend.** No component tests exist yet; CI treats a clean
+`tsc -b && vite build` as its correctness signal. React Testing Library
+with Vitest would be the natural addition, starting with the
+citation-marker rendering logic in `MessageBubble`, the most complex piece
+of frontend code in the project.
 
 ## Evaluation
 
-`eval/` contains a small retrieval-accuracy harness:
+`eval/` contains a retrieval-accuracy evaluation harness:
 
 - `eval/fixtures/aurora-bikes-handbook.pdf` — a generated, fictional
-  6-page employee handbook (source: `generate_fixture.py`) with one clear,
-  unambiguous fact per page, so ground-truth page numbers aren't a
-  judgment call.
-- `eval/fixtures/questions.json` — 15 questions: 12 the document actually
-  answers (with verified expected page numbers), and 3 deliberately
-  unanswerable — including one adversarial case ("vacation days in the
-  London office") designed to tempt a weaker RAG pipeline into
-  extrapolating from a real but different policy instead of admitting it
-  doesn't know.
-- `eval/run.ts` — signs up a throwaway user, uploads the fixture, waits for
-  processing, asks every question via the REST endpoint, and scores two
-  metrics: **answerability accuracy** (did it correctly attempt an answer
-  vs. correctly refuse?) and **citation-page accuracy** (for answerable
-  questions, does at least one cited page match a known-correct page?).
+  six-page employee handbook (source: `generate_fixture.py`) with one
+  unambiguous fact per page, so that expected page numbers are verifiable
+  rather than subjective.
+- `eval/fixtures/questions.json` — fifteen questions: twelve the document
+  answers, with verified expected page numbers, and three that are
+  deliberately unanswerable, including one adversarial question referring
+  to a detail the document does not contain, to test resistance to
+  extrapolation.
+- `eval/run.ts` — creates a temporary user, uploads the fixture, waits for
+  processing to complete, asks each question via the REST endpoint, and
+  reports two metrics: answerability accuracy (whether the system
+  correctly attempted or correctly refused an answer) and citation-page
+  accuracy (for answerable questions, whether at least one cited page
+  matches a known-correct page).
 
-Run it yourself against a running backend with a real `OPENROUTER_API_KEY`
-configured:
+To run the evaluation against a live backend with a configured
+`OPENROUTER_API_KEY`:
 
 ```bash
 cd eval
@@ -306,123 +303,98 @@ npm run eval                 # defaults to http://localhost:4000
 # EVAL_API_BASE=https://your-app.onrender.com npm run eval
 ```
 
-<!--
-Run at 2026-08-04T05:00:35.166Z, against a local backend with a real
-OpenRouter free-tier chat model configured. Re-run `npm run eval` and
-update this if the chat model, prompt, or retrieval logic changes.
--->
-
 | Metric | Result |
 |---|---|
-| Answerability accuracy | **93% (14/15)** |
-| Citation page accuracy (answerable questions only) | **75% (9/12)** |
+| Answerability accuracy | 93% (14/15) |
+| Citation page accuracy (answerable questions only) | 75% (9/12) |
 
-Full per-question breakdown: see `eval/results.md` after running `npm run eval`.
+The full per-question breakdown is written to `eval/results.md` on each
+run. Three questions did not score correctly:
 
-**The three misses, and why they happened** (worth calling out explicitly —
-a suspiciously perfect eval score is less credible than one with explained
-gaps):
+- **Two questions received a correct, correctly-sourced answer with no
+  citation marker.** In both cases the model drew on the correct excerpt
+  but omitted the `[n]` marker specified in the prompt. This reflects
+  instruction-following behavior of the configured free-tier chat model
+  rather than a retrieval failure — the relevant chunk was retrieved and
+  used correctly. A higher-capability chat model, or a system prompt with
+  a worked citation example, would likely close this gap.
+- **One question required combining two facts from non-adjacent pages**
+  (a PTO carryover figure and a parental-leave duration on separate
+  pages). Top-k retrieval ranks chunks by similarity to the question as a
+  whole, and a compound question referencing two unrelated facts does not
+  match either source page as strongly as a single-fact question would;
+  as a result, both facts were not retrieved together, and the system
+  correctly declined to answer rather than producing a partial or
+  incorrect comparison. This is a known limitation of single-pass top-k
+  retrieval for multi-hop questions; query decomposition — splitting a
+  compound question into sub-questions, retrieving for each separately,
+  and combining the results — is the standard mitigation.
+- **All three deliberately unanswerable questions were correctly
+  refused**, including the adversarial case. For a document Q&A system,
+  correctly refusing to answer is a more important signal than citation
+  accuracy on questions the document does answer, since an incorrect
+  refusal is preferable to a fabricated answer.
 
-- **q3 and q5 — correct answer, right page, but zero citation markers.**
-  The model answered accurately from the correct excerpt in both cases, but
-  didn't emit a `[n]` marker at all. This isn't a retrieval failure (the
-  relevant chunk was clearly found and used) — it's the free-tier chat
-  model not reliably following the citation-format instruction in the
-  system prompt. Smaller/free-tier models tend to lose formatting
-  constraints before they lose the core task; a paid model, or a stricter
-  prompt with a few-shot citation example, would likely close this gap.
-- **q12 — the one deliberately cross-section question, correctly refused
-  rather than guessed.** This question needs two facts from topically
-  distant pages (PTO carryover on page 3, parental leave on page 6).
-  Top-k retrieval ranks chunks by similarity to the question as a whole; a
-  question needing two unrelated facts stitched together doesn't match
-  either page's embedding as strongly as a single-fact question would, so
-  one or both facts likely didn't make it into the retrieved set together.
-  The model then correctly emitted the "not found" sentinel rather than
-  guessing at a comparison it couldn't fully support — arguably the
-  fallback behaving exactly as designed, not a defect. Multi-hop questions
-  like this are a known limitation of single-pass top-k retrieval; a
-  query-decomposition step (splitting a compound question into sub-
-  questions, retrieving for each separately, then combining) is the
-  standard fix, and a natural next feature rather than something this
-  project currently attempts.
-- **All 3 deliberately unanswerable questions (q13–q15) were correctly
-  refused**, including the adversarial "London office" question, which is
-  the more important signal for a document Q&A tool than any single
-  citation-accuracy point — a wrong refusal (hallucinating an answer that
-  isn't in the document) is a worse failure mode than a missed citation.
+This evaluation measures retrieval quality and refusal correctness; it
+does not score answer content against ground truth, which would require
+either human review or an LLM-as-judge step and is out of scope for this
+harness.
 
-**What this eval measures, and what it doesn't:** it checks retrieval
-quality (right page cited) and refusal correctness (says "not found" when
-it should), not answer *content* correctness — that would need either
-human review or an LLM-as-judge second pass, both scoped out here as
-beyond what a lightweight harness needs to demonstrate the retrieval
-pipeline is sound.
+## Security
 
-## Security notes
+- httpOnly, `SameSite`-scoped cookie authentication with CORS restricted
+  to an exact origin (see [Design decisions](#design-decisions)).
+- Application-level, Postgres-backed rate limiting on every endpoint that
+  calls the language model, enforced identically on the REST and
+  WebSocket paths so the limit cannot be bypassed by switching protocols.
+- Server-side request validation (Zod) on every request body, independent
+  of client-side form validation.
+- No refresh-token flow or server-side session store: a session is a
+  self-contained JWT valid for seven days. The only revocation mechanism
+  is rotating `JWT_SECRET`, which invalidates all sessions simultaneously.
+  This is an accepted scope limitation (see `backend/src/lib/auth.ts`).
+- An earlier version of the documents API exposed an endpoint that
+  accepted a client-supplied storage path, which a later deletion
+  endpoint passed directly to a filesystem removal call. Under the
+  project's original single-user development configuration this had no
+  practical effect; once multi-user authentication was introduced it
+  became an arbitrary-file-deletion vector, since any authenticated user
+  could register a document referencing an arbitrary server-side path and
+  then delete it. The endpoint was unused by the frontend and was removed
+  during the authentication implementation.
 
-- **httpOnly + SameSite cookie auth**, exact-origin CORS — see rationale
-  above.
-- **Postgres-backed rate limiting** on every LLM-calling endpoint (REST and
-  WebSocket both), so a client can't bypass the limit by switching
-  protocols.
-- **Fixed a real vulnerability during development**: an earlier version of
-  the documents router had a `POST /api/documents` endpoint (predating file
-  upload, from before Phase 2) that accepted a client-supplied
-  `storagePath` string. `DELETE /api/documents/:id` later passed that
-  stored path straight into `fs.unlink()`. With a single fake dev-user
-  stand-in (used before real auth existed) this was inert; once real
-  multi-user auth landed, it became a genuine arbitrary-file-delete
-  vector — any authenticated user could register a document row pointing
-  at any path on the server's filesystem, then delete it. It was dead code
-  by that point anyway (the frontend only ever called `/upload`), so it was
-  removed rather than patched.
-- **Zod validation** on every request body, server-side, independent of
-  frontend form validation.
-- **No refresh-token flow / server-side session store**: a session is a
-  self-contained JWT valid for 7 days. The only revocation mechanism is
-  rotating `JWT_SECRET`, which invalidates every session at once — a
-  known, accepted scope cut (see `backend/src/lib/auth.ts`).
+## Scaling considerations
 
-## What I'd do differently at scale
-
-- **Add an HNSW index on `chunks.embedding`** once chunk counts grow past
-  what exact search comfortably handles — see the pgvector section above.
-- **Move rate limiting to Redis** with a token-bucket or sliding-window
-  algorithm if this needed to hold up under real adversarial traffic
-  rather than just guard free-tier LLM quota from accidental bursts.
-- **Object storage instead of local disk** for uploaded PDFs — the current
-  `storage/` directory (see `backend/src/lib/storage.ts`) works for a
-  single Render instance but doesn't survive a redeploy or scale past one
-  instance. S3-compatible storage (or Neon's own object storage, if/when
-  available) would be the swap.
-- **A real session/revocation story** — either short-lived access tokens
-  with a refresh-token rotation flow, or a server-side session table so a
-  single compromised token can be revoked without rotating the secret for
-  every user.
-- **DB-backed integration tests in CI** — see [Testing strategy](#testing-strategy).
-- **Code-split the frontend bundle** — the production build currently
-  warns about a >500KB chunk, driven mostly by KaTeX's font files loading
-  eagerly for a math-rendering feature most conversations never use;
-  dynamic `import()` for the KaTeX/math-rendering path would defer that
-  weight until a document's answers actually contain math.
-- **LLM-as-judge or human-reviewed answer-content scoring** in the eval
-  harness, on top of today's retrieval/refusal-only metrics.
-- **Query decomposition for multi-hop questions** — the eval's one
-  cross-section question (q12: comparing a fact on page 3 against a fact on
-  page 6) was correctly refused rather than answered, because single-pass
-  top-k retrieval doesn't reliably surface two topically-distant chunks for
-  one compound question. Splitting a compound question into sub-questions,
-  retrieving separately for each, then combining, is the standard fix — a
-  measured gap from the eval results above, not a hypothetical one.
-- **A few-shot citation example in the system prompt**, or evaluating a
-  paid (non-free-tier) chat model — the eval showed two cases (q3, q5)
-  where the model gave a correct, correctly-sourced answer but skipped the
-  `[n]` citation marker entirely. That's an instruction-following gap
-  specific to the free-tier model in use, not a retrieval or prompt-logic
-  bug; worth re-running the eval against a couple of different free-tier
-  models to see whether it's model-specific before investing in a fancier
-  citation-enforcement scheme.
+- Add an HNSW or IVFFlat index on `chunks.embedding` once chunk volume
+  exceeds what exact search comfortably handles.
+- Replace the fixed-window rate limiter with a Redis-backed token-bucket
+  or sliding-window implementation if precise limits under adversarial
+  load become necessary, rather than the current goal of guarding against
+  accidental quota overuse.
+- Move uploaded PDF storage from local disk to object storage (S3-
+  compatible or equivalent). The current implementation
+  (`backend/src/lib/storage.ts`) is suitable for a single backend instance
+  but does not persist across redeploys or scale across multiple
+  instances.
+- Introduce a proper session/revocation mechanism — short-lived access
+  tokens with refresh-token rotation, or a server-side session table —
+  so an individual compromised token can be revoked without invalidating
+  every user's session.
+- Add database-backed integration tests to CI (see [Testing](#testing)).
+- Code-split the frontend bundle. The production build currently exceeds
+  the default chunk-size warning threshold, driven largely by KaTeX font
+  assets loaded eagerly for a math-rendering feature most conversations do
+  not use; deferring this via dynamic `import()` would remove that weight
+  from the initial load.
+- Extend the evaluation harness with LLM-as-judge or human-reviewed
+  answer-content scoring, in addition to the current retrieval and
+  refusal-correctness metrics.
+- Add query decomposition for multi-hop questions, per the evaluation
+  results above: a compound question requiring facts from non-adjacent
+  sections is not reliably served by single-pass top-k retrieval.
+- Evaluate citation-marker reliability across chat models, and consider a
+  worked citation example in the system prompt, per the evaluation
+  results above.
 
 ## Project structure
 
@@ -430,22 +402,22 @@ pipeline is sound.
 backend/
   src/
     routes/          REST routes (auth, documents, conversations)
-    ws/               WebSocket server (streaming chat)
-    pipeline/         PDF extract -> chunk -> embed
-    rag/              retrieval, prompt construction, citation parsing, generation
-    lib/              auth, rate limiting, OpenRouter client, file storage
-    middleware/       JWT authentication
-    db/               Drizzle schema + migrations
+    ws/              WebSocket server (streaming chat)
+    pipeline/        PDF extraction, chunking, embedding
+    rag/             retrieval, prompt construction, citation parsing, generation
+    lib/             auth, rate limiting, OpenRouter client, file storage
+    middleware/      JWT authentication
+    db/              Drizzle schema and migrations
   Dockerfile
 frontend/
   src/
-    components/       Sidebar, ChatPanel, MessageBubble, AuthScreen, ...
-    hooks/            useAuth, useChatSocket
-    api/              typed fetch client
+    components/      Sidebar, ChatPanel, MessageBubble, AuthScreen, ...
+    hooks/           useAuth, useChatSocket
+    api/             typed fetch client
 eval/
-  fixtures/           generated fixture PDF + ground-truth questions
-  run.ts              eval harness
-docker-compose.yml     local dev: pgvector Postgres + backend
-render.yaml            Render Blueprint for backend deployment
-.github/workflows/     CI: lint + typecheck + test/build, per package
+  fixtures/          fixture PDF and ground-truth questions
+  run.ts             evaluation harness
+docker-compose.yml   local development: pgvector Postgres + backend
+render.yaml          Render Blueprint for backend deployment
+.github/workflows/   CI: lint, typecheck, test/build, per package
 ```
